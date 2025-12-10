@@ -70,3 +70,4 @@ with Client(TOKEN, target=INVEST_GRPC_API) as client:
 
 Лицензия [The Apache License](https://github.com/RussianInvestments/invest-python/blob/main/LICENSE).
 # cult_trade_bot_01
+# cult_trade_bot_01
