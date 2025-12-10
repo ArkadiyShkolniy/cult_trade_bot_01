@@ -1,0 +1,325 @@
+# pylint: disable=redefined-outer-name,unused-variable
+
+import os
+import uuid
+from datetime import datetime
+
+import pytest
+
+from examples.sandbox.sandbox_cancel_stop_order import cancel_stop_order
+from examples.sandbox.sandbox_get_stop_orders import get_stop_orders
+from examples.sandbox.sandbox_post_stop_order import post_stop_order
+from tests.utils import skip_when
+from tinkoff.invest import (
+    Account,
+    CloseSandboxAccountResponse,
+    MoneyValue,
+    OperationState,
+    OrderDirection,
+    OrderType,
+    Quotation,
+    RequestError,
+)
+from tinkoff.invest.sandbox.client import SandboxClient
+from tinkoff.invest.schemas import (
+    OrderExecutionReportStatus,
+    PostOrderAsyncRequest,
+    StopOrderDirection,
+    StopOrderStatusOption,
+)
+from tinkoff.invest.utils import money_to_decimal
+
+
+@pytest.fixture()
+def sandbox_service():
+    with SandboxClient(token=os.environ["INVEST_SANDBOX_TOKEN"]) as client:
+        yield client
+
+
+@pytest.fixture()
+def initial_balance_pay_in() -> MoneyValue:
+    return MoneyValue(currency="rub", units=1000000, nano=0)
+
+
+@pytest.fixture()
+def account_id(sandbox_service, initial_balance_pay_in: MoneyValue):
+    response = sandbox_service.sandbox.open_sandbox_account()
+    sandbox_service.sandbox.sandbox_pay_in(
+        account_id=response.account_id,
+        amount=initial_balance_pay_in,
+    )
+    yield response.account_id
+    sandbox_service.sandbox.close_sandbox_account(
+        account_id=response.account_id,
+    )
+
+
+@pytest.fixture()
+def figi() -> str:
+    return "BBG333333333"
+
+
+@pytest.fixture()
+def instrument_id() -> str:
+    return "f509af83-6e71-462f-901f-bcb073f6773b"
+
+
+@pytest.fixture()
+def quantity() -> int:
+    return 10
+
+
+@pytest.fixture()
+def price() -> Quotation:
+    return Quotation(units=10, nano=0)
+
+
+@pytest.fixture()
+def direction() -> OrderDirection:
+    return OrderDirection.ORDER_DIRECTION_BUY
+
+
+@pytest.fixture()
+def stop_order_direction() -> StopOrderDirection:
+    return StopOrderDirection.STOP_ORDER_DIRECTION_BUY
+
+
+@pytest.fixture()
+def stop_order_status() -> StopOrderStatusOption:
+    return StopOrderStatusOption.STOP_ORDER_STATUS_ACTIVE
+
+
+@pytest.fixture()
+def order_type() -> OrderType:
+    return OrderType.ORDER_TYPE_LIMIT
+
+
+@pytest.fixture()
+def order_id() -> str:
+    return ""
+
+
+@pytest.fixture()
+def async_order_id() -> str:
+    return str(uuid.uuid4())
+
+
+@pytest.fixture()
+def order(instrument_id, quantity, price, direction, account_id, order_type, order_id):
+    return {
+        "instrument_id": instrument_id,
+        "quantity": quantity,
+        "price": price,
+        "direction": direction,
+        "account_id": account_id,
+        "order_type": order_type,
+        "order_id": order_id,
+    }
+
+
+@pytest.fixture()
+def async_order(
+    instrument_id, quantity, price, direction, account_id, order_type, async_order_id
+):
+    return {
+        "instrument_id": instrument_id,
+        "quantity": quantity,
+        "price": price,
+        "direction": direction,
+        "account_id": account_id,
+        "order_type": order_type,
+        "order_id": async_order_id,
+    }
+
+
+skip_when_exchange_closed = skip_when(
+    RequestError,
+    lambda msg: "instrument is not available for trading" in msg,
+    reason="Skipping during closed exchange",
+)
+
+
+@pytest.mark.skipif(
+    os.environ.get("INVEST_SANDBOX_TOKEN") is None,
+    reason="INVEST_SANDBOX_TOKEN should be specified",
+)
+class TestSandboxOperations:
+    def test_open_sandbox_account(self, sandbox_service):
+        response = sandbox_service.sandbox.open_sandbox_account()
+        assert isinstance(response.account_id, str)
+        sandbox_service.sandbox.close_sandbox_account(
+            account_id=response.account_id,
+        )
+
+    def test_get_sandbox_accounts(self, sandbox_service, account_id):
+        response = sandbox_service.users.get_accounts()
+        assert isinstance(response.accounts, list)
+        assert isinstance(response.accounts[0], Account)
+        assert (
+            len(
+                [
+                    _account
+                    for _account in response.accounts
+                    if _account.id == account_id
+                ]
+            )
+            == 1
+        )
+
+    def test_close_sandbox_account(self, sandbox_service):
+        response = sandbox_service.sandbox.open_sandbox_account()
+        response = sandbox_service.sandbox.close_sandbox_account(
+            account_id=response.account_id,
+        )
+        assert isinstance(response, CloseSandboxAccountResponse)
+
+    @skip_when_exchange_closed
+    def test_post_sandbox_order(
+        self, sandbox_service, order, instrument_id, direction, quantity
+    ):
+        response = sandbox_service.orders.post_order(**order)
+        assert isinstance(response.order_id, str)
+        assert response.instrument_uid == instrument_id
+        assert response.direction == direction
+        assert response.lots_requested == quantity
+
+    @skip_when_exchange_closed
+    def test_post_sandbox_order_async(
+        self,
+        sandbox_service,
+        async_order,
+        instrument_id,
+        direction,
+        quantity,
+        async_order_id,
+    ):
+        request = PostOrderAsyncRequest(**async_order)
+        response = sandbox_service.orders.post_order_async(request)
+        assert isinstance(response.order_request_id, str)
+        assert (
+            response.execution_report_status
+            == OrderExecutionReportStatus.EXECUTION_REPORT_STATUS_NEW
+        )
+        assert response.order_request_id == async_order_id
+
+    @skip_when_exchange_closed
+    def test_get_sandbox_orders(self, sandbox_service, order, account_id):
+        response = sandbox_service.orders.post_order(**order)
+        assert response
+
+    @skip_when_exchange_closed
+    @pytest.mark.skip(reason="Order executes faster than cancel")
+    def test_cancel_sandbox_order(self, sandbox_service, order, account_id):
+        response = sandbox_service.orders.post_order(**order)
+        response = sandbox_service.orders.cancel_order(
+            account_id=account_id,
+            order_id=response.order_id,
+        )
+        assert isinstance(response.time, datetime)
+
+    @skip_when_exchange_closed
+    def test_get_sandbox_order_state(
+        self, sandbox_service, order, account_id, instrument_id, direction, quantity
+    ):
+        response = sandbox_service.orders.post_order(**order)
+
+        response = sandbox_service.orders.get_order_state(
+            account_id=account_id,
+            order_id=response.order_id,
+        )
+        assert response.instrument_uid == instrument_id
+        assert response.direction == direction
+        assert response.lots_requested == quantity
+
+    @pytest.mark.parametrize("order_type", [OrderType.ORDER_TYPE_MARKET])
+    @skip_when_exchange_closed
+    def test_get_sandbox_positions(
+        self, sandbox_service, account_id, order, order_type
+    ):
+        _ = sandbox_service.orders.post_order(**order)
+
+        response = sandbox_service.operations.get_positions(account_id=account_id)
+
+        assert isinstance(response.money[0], MoneyValue)
+        assert response.money[0].currency == "rub"
+
+    def test_get_sandbox_operations(self, sandbox_service, account_id, order, figi):
+        response = sandbox_service.operations.get_operations(
+            account_id=account_id,
+            from_=datetime(2000, 2, 2),
+            to=datetime(2022, 2, 2),
+            state=OperationState.OPERATION_STATE_EXECUTED,
+            figi=figi,
+        )
+        assert isinstance(response.operations, list)
+
+    def test_get_sandbox_portfolio(
+        self, sandbox_service, account_id, initial_balance_pay_in: MoneyValue
+    ):
+        response = sandbox_service.operations.get_portfolio(
+            account_id=account_id,
+        )
+        assert str(response.total_amount_bonds) == str(
+            MoneyValue(currency="rub", units=0, nano=0)
+        )
+        assert str(response.total_amount_currencies) == str(
+            initial_balance_pay_in,
+        )
+        assert str(response.total_amount_etf) == str(
+            MoneyValue(currency="rub", units=0, nano=0)
+        )
+        assert str(response.total_amount_futures) == str(
+            MoneyValue(currency="rub", units=0, nano=0)
+        )
+        assert str(response.total_amount_shares) == str(
+            MoneyValue(currency="rub", units=0, nano=0)
+        )
+
+    def test_sandbox_pay_in(
+        self, sandbox_service, account_id, initial_balance_pay_in: MoneyValue
+    ):
+        amount = MoneyValue(currency="rub", units=1234, nano=0)
+        response = sandbox_service.sandbox.sandbox_pay_in(
+            account_id=account_id,
+            amount=amount,
+        )
+
+        assert money_to_decimal(response.balance) == (
+            money_to_decimal(initial_balance_pay_in) + money_to_decimal(amount)
+        )
+
+    @skip_when_exchange_closed
+    def test_sandbox_post_stop_order(
+        self,
+        sandbox_service,
+        account_id,
+        instrument_id,
+        stop_order_direction,
+        quantity,
+        price,
+    ):
+        response = post_stop_order(
+            sandbox_service,
+            account_id,
+            instrument_id,
+            stop_order_direction,
+            quantity,
+            price,
+        )
+        assert response.order_request_id is not None
+        assert response.stop_order_id is not None
+
+    def test_sandbox_get_stop_orders(
+        self, sandbox_service, account_id, stop_order_status
+    ):
+        response = get_stop_orders(sandbox_service, account_id, stop_order_status)
+        assert isinstance(response.stop_orders, list)
+
+    def test_sandbox_cancel_stop_order(self, sandbox_service, account_id):
+        stop_orders = get_stop_orders(
+            sandbox_service, account_id, StopOrderStatusOption.STOP_ORDER_STATUS_ACTIVE
+        )
+        if len(stop_orders.stop_orders) > 0:
+            stop_order_id = stop_orders.stop_orders[0].stop_order_id
+            response = cancel_stop_order(sandbox_service, account_id, stop_order_id)
+            assert isinstance(response.time, datetime)
