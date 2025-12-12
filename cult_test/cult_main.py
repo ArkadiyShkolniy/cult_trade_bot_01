@@ -25,6 +25,7 @@ from tinkoff.invest import (
     StopOrderDirection,
     StopOrderType,
     StopOrderExpirationType,
+    StopOrderStatusOption,
 )
 from tinkoff.invest.utils import (
     quotation_to_decimal,
@@ -41,6 +42,68 @@ CLASS_CODE = "TQBR"  # Класс кода для акций на Московс
 WAIT_MINUTES = 5
 STOP_LOSS_PERCENTAGE = 0.003  # 0.3% ниже цены покупки
 TAKE_PROFIT_PERCENTAGE = 0.01  # 1% выше цены покупки
+
+
+def cancel_all_orders_for_instrument(client, account_id, instrument_id, instrument_figi):
+    """
+    Отменяет все активные ордера и стоп-ордера для указанного инструмента.
+    
+    Args:
+        client: Клиент Tinkoff Invest
+        account_id: ID счета
+        instrument_id: UID инструмента
+        instrument_figi: FIGI инструмента
+    """
+    print(f"\nОтменяем все заявки по инструменту {instrument_figi}...")
+    
+    cancelled_count = 0
+    
+    try:
+        # Получаем все активные ордера
+        orders_response = client.orders.get_orders(account_id=account_id)
+        
+        # Отменяем ордера по нашему инструменту
+        for order in orders_response.orders:
+            if order.instrument_uid == instrument_id or order.figi == instrument_figi:
+                try:
+                    client.orders.cancel_order(
+                        account_id=account_id,
+                        order_id=order.order_id
+                    )
+                    print(f"  ✅ Отменен ордер: {order.order_id}")
+                    cancelled_count += 1
+                except Exception as e:
+                    print(f"  ⚠️ Ошибка при отмене ордера {order.order_id}: {e}")
+        
+        # Получаем все активные стоп-ордера
+        stop_orders_response = client.stop_orders.get_stop_orders(
+            account_id=account_id,
+            status=StopOrderStatusOption.STOP_ORDER_STATUS_ACTIVE
+        )
+        
+        # Отменяем стоп-ордера по нашему инструменту
+        for stop_order in stop_orders_response.stop_orders:
+            if stop_order.instrument_uid == instrument_id or stop_order.figi == instrument_figi:
+                try:
+                    client.stop_orders.cancel_stop_order(
+                        account_id=account_id,
+                        stop_order_id=stop_order.stop_order_id
+                    )
+                    print(f"  ✅ Отменен стоп-ордер: {stop_order.stop_order_id}")
+                    cancelled_count += 1
+                except Exception as e:
+                    print(f"  ⚠️ Ошибка при отмене стоп-ордера {stop_order.stop_order_id}: {e}")
+        
+        if cancelled_count > 0:
+            print(f"✅ Всего отменено заявок: {cancelled_count}")
+        else:
+            print("ℹ️ Активных заявок по инструменту не найдено")
+            
+    except Exception as e:
+        print(f"❌ Ошибка при отмене заявок: {e}")
+        import traceback
+        traceback.print_exc()
+
 
 with Client(TOKEN) as client:
     # Получаем список аккаунтов
@@ -95,6 +158,10 @@ with Client(TOKEN) as client:
         executed_price = money_to_decimal(buy_response.executed_order_price)
         print(f"Цена исполнения покупки: {executed_price}")
         
+        # Сохраняем ID стоп-ордеров для отслеживания
+        stop_order_id = None
+        take_profit_order_id = None
+        
         # Рассчитываем цену стоп-лосс (0.3% ниже цены покупки)
         stop_loss_price = executed_price * Decimal(1 - STOP_LOSS_PERCENTAGE)
         
@@ -117,8 +184,9 @@ with Client(TOKEN) as client:
                 order_id=str(uuid4()),
             )
             
+            stop_order_id = stop_order_response.stop_order_id
             print(f"✅ Стоп-лосс ордер успешно выставлен!")
-            print(f"ID стоп-ордера: {stop_order_response.stop_order_id}")
+            print(f"ID стоп-ордера: {stop_order_id}")
             print(f"Стоп-цена: {stop_loss_price}")
             
         except Exception as e:
@@ -149,8 +217,9 @@ with Client(TOKEN) as client:
                 order_id=str(uuid4()),
             )
             
+            take_profit_order_id = take_profit_response.stop_order_id
             print(f"✅ Тейк-профит ордер успешно выставлен!")
-            print(f"ID тейк-профит ордера: {take_profit_response.stop_order_id}")
+            print(f"ID тейк-профит ордера: {take_profit_order_id}")
             print(f"Цена тейк-профит: {take_profit_price}")
             
         except Exception as e:
@@ -173,13 +242,15 @@ with Client(TOKEN) as client:
                 print(f"Найдена позиция: {position_quantity} лотов")
                 break
         
+        # Если позиция равна 0 или меньше 1, значит актив продан или сработал стоп/тейк-профит
         if position_quantity < Decimal("1"):
-            print(f"ОШИБКА: Недостаточно акций для продажи! Доступно: {position_quantity} лотов")
-            print("Список всех позиций:")
-            for pos in portfolio.positions:
-                qty = quotation_to_decimal(pos.quantity)
-                if qty > 0:
-                    print(f"  - {pos.figi} ({pos.instrument_uid}): {qty} лотов")
+            print(f"\n⚠️ Позиция по инструменту отсутствует или меньше 1 лота ({position_quantity})")
+            print("Возможно, сработал стоп-лосс или тейк-профит, или актив был продан")
+            
+            # Отменяем все заявки по этому инструменту
+            cancel_all_orders_for_instrument(client, account_id, instrument_id, instrument_figi)
+            
+            print("✅ Обработка завершена - позиция закрыта")
         else:
             # Продаем 1 акцию
             print(f"\nПродаем 1 акцию {TICKER}...")
@@ -187,7 +258,7 @@ with Client(TOKEN) as client:
                 sell_response = client.orders.post_order(
                     order_type=OrderType.ORDER_TYPE_MARKET,
                     direction=OrderDirection.ORDER_DIRECTION_SELL,
-                    instrument_id=instrument_id,  # Можно также использовать figi=instrument_figi
+                    instrument_id=instrument_id,
                     quantity=1,
                     account_id=account_id,
                     order_id=str(uuid4()),
@@ -204,6 +275,10 @@ with Client(TOKEN) as client:
                     OrderExecutionReportStatus.EXECUTION_REPORT_STATUS_PARTIALLYFILL,
                 ]:
                     print("✅ Продажа успешно принята!")
+                    
+                    # После успешной продажи отменяем все заявки по инструменту
+                    cancel_all_orders_for_instrument(client, account_id, instrument_id, instrument_figi)
+                    
                 else:
                     print(f"❌ Ошибка при продаже. Статус: {sell_status}")
             except Exception as e:
