@@ -2,15 +2,36 @@ import os
 import time
 from uuid import uuid4
 from decimal import Decimal
+from datetime import timedelta
+from dotenv import load_dotenv
+import os
+
+# Загрузить переменные из .env
+load_dotenv()
+
+TOKEN = os.environ.get("TINKOFF_INVEST_TOKEN")
+if not TOKEN:
+    raise ValueError("TINKOFF_INVEST_TOKEN не установлен!")
+
+# Временная отладка - проверка токена (удалите после теста)
+print(f"Токен загружен: {TOKEN[:10]}...{TOKEN[-10:] if len(TOKEN) > 20 else 'короткий'}")  # Показывает только начало и конец
 
 from tinkoff.invest import (
     Client, 
     OrderDirection, 
     OrderType, 
     InstrumentIdType,
-    OrderExecutionReportStatus
+    OrderExecutionReportStatus,
+    StopOrderDirection,
+    StopOrderType,
+    StopOrderExpirationType,
 )
-from tinkoff.invest.utils import quotation_to_decimal
+from tinkoff.invest.utils import (
+    quotation_to_decimal,
+    decimal_to_quotation,
+    money_to_decimal,
+    now,
+)
 
 TOKEN = os.environ["TINKOFF_INVEST_TOKEN"]
 
@@ -18,6 +39,8 @@ TOKEN = os.environ["TINKOFF_INVEST_TOKEN"]
 TICKER = "SBER"
 CLASS_CODE = "TQBR"  # Класс кода для акций на Московской бирже
 WAIT_MINUTES = 5
+STOP_LOSS_PERCENTAGE = 0.003  # 0.3% ниже цены покупки
+TAKE_PROFIT_PERCENTAGE = 0.01  # 1% выше цены покупки
 
 with Client(TOKEN) as client:
     # Получаем список аккаунтов
@@ -35,9 +58,12 @@ with Client(TOKEN) as client:
     instrument_id = instrument.instrument.uid
     instrument_figi = instrument.instrument.figi
     instrument_name = instrument.instrument.name
+    min_price_increment = quotation_to_decimal(instrument.instrument.min_price_increment)
+    
     print(f"Инструмент: {instrument_name}")
     print(f"FIGI: {instrument_figi}")
     print(f"UID: {instrument_id}")
+    print(f"Минимальный шаг цены: {min_price_increment}")
     
     # Покупаем 1 акцию
     print(f"\nПокупаем 1 акцию {TICKER}...")
@@ -64,6 +90,73 @@ with Client(TOKEN) as client:
     
     if is_order_accepted:
         print("Покупка успешно принята!")
+        
+        # Получаем цену исполнения покупки
+        executed_price = money_to_decimal(buy_response.executed_order_price)
+        print(f"Цена исполнения покупки: {executed_price}")
+        
+        # Рассчитываем цену стоп-лосс (0.3% ниже цены покупки)
+        stop_loss_price = executed_price * Decimal(1 - STOP_LOSS_PERCENTAGE)
+        
+        # Округляем цену до минимального шага цены
+        stop_loss_price = round(stop_loss_price / min_price_increment) * min_price_increment
+        
+        print(f"\nВыставляем стоп-лосс на {STOP_LOSS_PERCENTAGE * 100}% ниже цены покупки...")
+        print(f"Цена стоп-лосс: {stop_loss_price}")
+        
+        try:
+            # Выставляем стоп-лосс ордер
+            stop_order_response = client.stop_orders.post_stop_order(
+                instrument_id=instrument_id,
+                quantity=1,
+                stop_price=decimal_to_quotation(stop_loss_price),
+                direction=StopOrderDirection.STOP_ORDER_DIRECTION_SELL,
+                account_id=account_id,
+                stop_order_type=StopOrderType.STOP_ORDER_TYPE_STOP_LOSS,
+                expiration_type=StopOrderExpirationType.STOP_ORDER_EXPIRATION_TYPE_GOOD_TILL_CANCEL,
+                order_id=str(uuid4()),
+            )
+            
+            print(f"✅ Стоп-лосс ордер успешно выставлен!")
+            print(f"ID стоп-ордера: {stop_order_response.stop_order_id}")
+            print(f"Стоп-цена: {stop_loss_price}")
+            
+        except Exception as e:
+            print(f"❌ Ошибка при выставлении стоп-лосс: {e}")
+            import traceback
+            traceback.print_exc()
+        
+        # Рассчитываем цену тейк-профит (1% выше цены покупки)
+        take_profit_price = executed_price * Decimal(1 + TAKE_PROFIT_PERCENTAGE)
+        
+        # Округляем цену до минимального шага цены
+        take_profit_price = round(take_profit_price / min_price_increment) * min_price_increment
+        
+        print(f"\nВыставляем тейк-профит на {TAKE_PROFIT_PERCENTAGE * 100}% выше цены покупки...")
+        print(f"Цена тейк-профит: {take_profit_price}")
+        
+        try:
+            # Выставляем тейк-профит ордер
+            take_profit_response = client.stop_orders.post_stop_order(
+                instrument_id=instrument_id,
+                quantity=1,
+                price=decimal_to_quotation(take_profit_price),
+                stop_price=decimal_to_quotation(take_profit_price),
+                direction=StopOrderDirection.STOP_ORDER_DIRECTION_SELL,
+                account_id=account_id,
+                stop_order_type=StopOrderType.STOP_ORDER_TYPE_TAKE_PROFIT,
+                expiration_type=StopOrderExpirationType.STOP_ORDER_EXPIRATION_TYPE_GOOD_TILL_CANCEL,
+                order_id=str(uuid4()),
+            )
+            
+            print(f"✅ Тейк-профит ордер успешно выставлен!")
+            print(f"ID тейк-профит ордера: {take_profit_response.stop_order_id}")
+            print(f"Цена тейк-профит: {take_profit_price}")
+            
+        except Exception as e:
+            print(f"❌ Ошибка при выставлении тейк-профит: {e}")
+            import traceback
+            traceback.print_exc()
         
         # Ждем 5 минут
         print(f"\nЖдем {WAIT_MINUTES} минут перед продажей...")
