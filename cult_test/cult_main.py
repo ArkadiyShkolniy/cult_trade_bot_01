@@ -1,5 +1,4 @@
 import os
-import time
 from uuid import uuid4
 from decimal import Decimal
 from datetime import timedelta
@@ -26,7 +25,12 @@ from tinkoff.invest import (
     StopOrderType,
     StopOrderExpirationType,
     StopOrderStatusOption,
+    TakeProfitType,
+    ExchangeOrderType,
+    PostStopOrderRequestTrailingData,
+    CandleInterval,
 )
+from tinkoff.invest.schemas import TrailingValueType
 from tinkoff.invest.utils import (
     quotation_to_decimal,
     decimal_to_quotation,
@@ -39,9 +43,120 @@ TOKEN = os.environ["TINKOFF_INVEST_TOKEN"]
 # Тикер Сбербанка
 TICKER = "SBER"
 CLASS_CODE = "TQBR"  # Класс кода для акций на Московской бирже
-WAIT_MINUTES = 5
-STOP_LOSS_PERCENTAGE = 0.003  # 0.3% ниже цены покупки
+TRAILING_STOP_INDENT_PERCENTAGE = 0.003  # 0.3% - отступ trailing stop от максимальной цены
+TRAILING_STOP_SPREAD_PERCENTAGE = 0.5  # 0.5% - защитный спред для trailing stop
 TAKE_PROFIT_PERCENTAGE = 0.01  # 1% выше цены покупки
+
+# Параметры EMA стратегии
+EMA_SHORT_PERIOD = 30  # Быстрая EMA
+EMA_LONG_PERIOD = 195  # Медленная EMA
+CANDLE_INTERVAL = CandleInterval.CANDLE_INTERVAL_30_MIN  # Таймфрейм 30 минут
+
+
+def calculate_ema(prices: list[Decimal], period: int) -> list[Decimal]:
+    """
+    Вычисляет экспоненциальную скользящую среднюю (EMA).
+    
+    Args:
+        prices: Список цен закрытия свечей
+        period: Период EMA
+    
+    Returns:
+        Список значений EMA
+    """
+    if len(prices) < period:
+        return []
+    
+    ema_values = []
+    multiplier = Decimal(2) / Decimal(period + 1)
+    
+    # Первое значение EMA = простое среднее первых period значений
+    first_ema = sum(prices[:period]) / Decimal(period)
+    ema_values.append(first_ema)
+    
+    # Остальные значения EMA
+    for i in range(period, len(prices)):
+        ema = (prices[i] * multiplier) + (ema_values[-1] * (Decimal(1) - multiplier))
+        ema_values.append(ema)
+    
+    return ema_values
+
+
+def get_trading_signal(client, instrument_id, instrument_figi, ema_short_period, ema_long_period, candle_interval):
+    """
+    Получает торговый сигнал на основе пересечения EMA.
+    
+    Returns:
+        'BUY' - сигнал на покупку (EMA короткая пересекла EMA длинную снизу вверх)
+        'SELL' - сигнал на продажу (EMA короткая пересекла EMA длинную сверху вниз)
+        'HOLD' - нет сигнала
+    """
+    # Получаем свечи за период, достаточный для расчета EMA(195)
+    # Нужно минимум 195 свечей + несколько дополнительных для надежности
+    days_back = max(ema_long_period * 2, 100)  # Достаточно для EMA(195) на 30-минутных свечах
+    
+    print(f"\nЗагружаем исторические свечи за последние {days_back} дней...")
+    candles = list(client.get_all_candles(
+        instrument_id=instrument_id,
+        from_=now() - timedelta(days=days_back),
+        to=now(),
+        interval=candle_interval,
+    ))
+    
+    if len(candles) < ema_long_period:
+        print(f"⚠️ Недостаточно свечей: {len(candles)}, требуется минимум {ema_long_period}")
+        return 'HOLD'
+    
+    # Получаем цены закрытия
+    prices = [quotation_to_decimal(candle.close) for candle in candles]
+    
+    # Рассчитываем EMA
+    ema_short_values = calculate_ema(prices, ema_short_period)
+    ema_long_values = calculate_ema(prices, ema_long_period)
+    
+    if len(ema_short_values) < 2 or len(ema_long_values) < 2:
+        print("⚠️ Недостаточно данных для определения сигнала")
+        return 'HOLD'
+    
+    # Берем последние два значения для определения пересечения
+    # Индексы для последних значений (после расчета EMA их меньше на период)
+    short_idx = len(ema_short_values) - 1
+    long_idx = len(ema_long_values) - 1
+    
+    current_ema_short = ema_short_values[short_idx]
+    current_ema_long = ema_long_values[long_idx]
+    
+    prev_ema_short = ema_short_values[short_idx - 1] if short_idx > 0 else None
+    prev_ema_long = ema_long_values[long_idx - 1] if long_idx > 0 else None
+    
+    print(f"\nТекущие значения EMA:")
+    print(f"  EMA({ema_short_period}): {current_ema_short}")
+    print(f"  EMA({ema_long_period}): {current_ema_long}")
+    
+    if prev_ema_short is not None and prev_ema_long is not None:
+        print(f"\nПредыдущие значения EMA:")
+        print(f"  EMA({ema_short_period}): {prev_ema_short}")
+        print(f"  EMA({ema_long_period}): {prev_ema_long}")
+        
+        # Проверяем пересечение (Золотой крест / Мертвый крест)
+        # Золотой крест: EMA короткая пересекла EMA длинную снизу вверх (сигнал на покупку)
+        if prev_ema_short <= prev_ema_long and current_ema_short > current_ema_long:
+            print(f"\n✅ СИГНАЛ НА ПОКУПКУ: Золотой крест!")
+            print(f"   EMA({ema_short_period}) пересекла EMA({ema_long_period}) снизу вверх")
+            return 'BUY'
+        
+        # Мертвый крест: EMA короткая пересекла EMA длинную сверху вниз (сигнал на продажу)
+        elif prev_ema_short >= prev_ema_long and current_ema_short < current_ema_long:
+            print(f"\n✅ СИГНАЛ НА ПРОДАЖУ: Мертвый крест!")
+            print(f"   EMA({ema_short_period}) пересекла EMA({ema_long_period}) сверху вниз")
+            return 'SELL'
+        else:
+            if current_ema_short > current_ema_long:
+                print(f"\nℹ️ Тренд бычий (EMA{ema_short_period} > EMA{ema_long_period}), но пересечения нет")
+            else:
+                print(f"\nℹ️ Тренд медвежий (EMA{ema_short_period} < EMA{ema_long_period}), но пересечения нет")
+    
+    return 'HOLD'
 
 
 def cancel_all_orders_for_instrument(client, account_id, instrument_id, instrument_figi):
@@ -127,167 +242,149 @@ with Client(TOKEN) as client:
     print(f"FIGI: {instrument_figi}")
     print(f"UID: {instrument_id}")
     print(f"Минимальный шаг цены: {min_price_increment}")
+    print(f"Таймфрейм: 30 минут")
+    print(f"EMA периоды: {EMA_SHORT_PERIOD} и {EMA_LONG_PERIOD}")
     
-    # Покупаем 1 акцию
-    print(f"\nПокупаем 1 акцию {TICKER}...")
-    buy_response = client.orders.post_order(
-        order_type=OrderType.ORDER_TYPE_MARKET,
-        direction=OrderDirection.ORDER_DIRECTION_BUY,
+    # Проверяем торговый сигнал на основе EMA
+    signal = get_trading_signal(
+        client=client,
         instrument_id=instrument_id,
-        quantity=1,
-        account_id=account_id,
-        order_id=str(uuid4()),
+        instrument_figi=instrument_figi,
+        ema_short_period=EMA_SHORT_PERIOD,
+        ema_long_period=EMA_LONG_PERIOD,
+        candle_interval=CANDLE_INTERVAL,
     )
     
-    status = buy_response.execution_report_status
-    print(f"Статус покупки: {status} ({OrderExecutionReportStatus(status).name})")
-    print(f"Сообщение: {buy_response.message}")
-    print(f"Исполнено лотов: {buy_response.lots_executed}")
-    
-    # Проверяем, что ордер успешно принят (NEW, FILL или PARTIALLYFILL)
-    is_order_accepted = status in [
-        OrderExecutionReportStatus.EXECUTION_REPORT_STATUS_NEW,  # 4 - заявка принята
-        OrderExecutionReportStatus.EXECUTION_REPORT_STATUS_FILL,  # 1 - полностью исполнена
-        OrderExecutionReportStatus.EXECUTION_REPORT_STATUS_PARTIALLYFILL,  # 5 - частично исполнена
-    ]
-    
-    if is_order_accepted:
-        print("Покупка успешно принята!")
-        
-        # Получаем цену исполнения покупки
-        executed_price = money_to_decimal(buy_response.executed_order_price)
-        print(f"Цена исполнения покупки: {executed_price}")
-        
-        # Сохраняем ID стоп-ордеров для отслеживания
-        stop_order_id = None
-        take_profit_order_id = None
-        
-        # Рассчитываем цену стоп-лосс (0.3% ниже цены покупки)
-        stop_loss_price = executed_price * Decimal(1 - STOP_LOSS_PERCENTAGE)
-        
-        # Округляем цену до минимального шага цены
-        stop_loss_price = round(stop_loss_price / min_price_increment) * min_price_increment
-        
-        print(f"\nВыставляем стоп-лосс на {STOP_LOSS_PERCENTAGE * 100}% ниже цены покупки...")
-        print(f"Цена стоп-лосс: {stop_loss_price}")
-        
-        try:
-            # Выставляем стоп-лосс ордер
-            stop_order_response = client.stop_orders.post_stop_order(
-                instrument_id=instrument_id,
-                quantity=1,
-                stop_price=decimal_to_quotation(stop_loss_price),
-                direction=StopOrderDirection.STOP_ORDER_DIRECTION_SELL,
-                account_id=account_id,
-                stop_order_type=StopOrderType.STOP_ORDER_TYPE_STOP_LOSS,
-                expiration_type=StopOrderExpirationType.STOP_ORDER_EXPIRATION_TYPE_GOOD_TILL_CANCEL,
-                order_id=str(uuid4()),
-            )
-            
-            stop_order_id = stop_order_response.stop_order_id
-            print(f"✅ Стоп-лосс ордер успешно выставлен!")
-            print(f"ID стоп-ордера: {stop_order_id}")
-            print(f"Стоп-цена: {stop_loss_price}")
-            
-        except Exception as e:
-            print(f"❌ Ошибка при выставлении стоп-лосс: {e}")
-            import traceback
-            traceback.print_exc()
-        
-        # Рассчитываем цену тейк-профит (1% выше цены покупки)
-        take_profit_price = executed_price * Decimal(1 + TAKE_PROFIT_PERCENTAGE)
-        
-        # Округляем цену до минимального шага цены
-        take_profit_price = round(take_profit_price / min_price_increment) * min_price_increment
-        
-        print(f"\nВыставляем тейк-профит на {TAKE_PROFIT_PERCENTAGE * 100}% выше цены покупки...")
-        print(f"Цена тейк-профит: {take_profit_price}")
-        
-        try:
-            # Выставляем тейк-профит ордер
-            take_profit_response = client.stop_orders.post_stop_order(
-                instrument_id=instrument_id,
-                quantity=1,
-                price=decimal_to_quotation(take_profit_price),
-                stop_price=decimal_to_quotation(take_profit_price),
-                direction=StopOrderDirection.STOP_ORDER_DIRECTION_SELL,
-                account_id=account_id,
-                stop_order_type=StopOrderType.STOP_ORDER_TYPE_TAKE_PROFIT,
-                expiration_type=StopOrderExpirationType.STOP_ORDER_EXPIRATION_TYPE_GOOD_TILL_CANCEL,
-                order_id=str(uuid4()),
-            )
-            
-            take_profit_order_id = take_profit_response.stop_order_id
-            print(f"✅ Тейк-профит ордер успешно выставлен!")
-            print(f"ID тейк-профит ордера: {take_profit_order_id}")
-            print(f"Цена тейк-профит: {take_profit_price}")
-            
-        except Exception as e:
-            print(f"❌ Ошибка при выставлении тейк-профит: {e}")
-            import traceback
-            traceback.print_exc()
-        
-        # Ждем 5 минут
-        print(f"\nЖдем {WAIT_MINUTES} минут перед продажей...")
-        time.sleep(WAIT_MINUTES * 60)
-        
-        # Проверяем позицию перед продажей
-        print("\nПроверяем позицию в портфеле...")
-        portfolio = client.operations.get_portfolio(account_id=account_id)
-        position_quantity = Decimal(0)
-        
-        for position in portfolio.positions:
-            if position.figi == instrument_figi or position.instrument_uid == instrument_id:
-                position_quantity = quotation_to_decimal(position.quantity)
-                print(f"Найдена позиция: {position_quantity} лотов")
-                break
-        
-        # Если позиция равна 0 или меньше 1, значит актив продан или сработал стоп/тейк-профит
-        if position_quantity < Decimal("1"):
-            print(f"\n⚠️ Позиция по инструменту отсутствует или меньше 1 лота ({position_quantity})")
-            print("Возможно, сработал стоп-лосс или тейк-профит, или актив был продан")
-            
-            # Отменяем все заявки по этому инструменту
-            cancel_all_orders_for_instrument(client, account_id, instrument_id, instrument_figi)
-            
-            print("✅ Обработка завершена - позиция закрыта")
+    if signal != 'BUY':
+        if signal == 'SELL':
+            print(f"\n⚠️ Получен сигнал на продажу, но покупка не выполняется.")
+            print("Для автоматической продажи нужна открытая позиция.")
         else:
-            # Продаем 1 акцию
-            print(f"\nПродаем 1 акцию {TICKER}...")
+            print(f"\n⚠️ Нет сигнала на покупку. Покупка не выполняется.")
+        print("Программа завершена.")
+    else:
+        # Покупаем 1 акцию
+        print(f"\nПокупаем 1 акцию {TICKER}...")
+        buy_response = client.orders.post_order(
+            order_type=OrderType.ORDER_TYPE_MARKET,
+            direction=OrderDirection.ORDER_DIRECTION_BUY,
+            instrument_id=instrument_id,
+            quantity=1,
+            account_id=account_id,
+            order_id=str(uuid4()),
+        )
+        
+        status = buy_response.execution_report_status
+        print(f"Статус покупки: {status} ({OrderExecutionReportStatus(status).name})")
+        print(f"Сообщение: {buy_response.message}")
+        print(f"Исполнено лотов: {buy_response.lots_executed}")
+        
+        # Проверяем, что ордер успешно принят (NEW, FILL или PARTIALLYFILL)
+        is_order_accepted = status in [
+            OrderExecutionReportStatus.EXECUTION_REPORT_STATUS_NEW,  # 4 - заявка принята
+            OrderExecutionReportStatus.EXECUTION_REPORT_STATUS_FILL,  # 1 - полностью исполнена
+            OrderExecutionReportStatus.EXECUTION_REPORT_STATUS_PARTIALLYFILL,  # 5 - частично исполнена
+        ]
+        
+        if is_order_accepted:
+            print("Покупка успешно принята!")
+            
+            # Получаем цену исполнения покупки
+            executed_price = money_to_decimal(buy_response.executed_order_price)
+            print(f"Цена исполнения покупки: {executed_price}")
+            
+            # Сохраняем ID стоп-ордеров для отслеживания
+            trailing_stop_order_id = None
+            take_profit_order_id = None
+            
+            # Рассчитываем начальную стоп-цену для trailing stop (0.3% ниже цены покупки)
+            initial_stop_price = executed_price * Decimal(1 - TRAILING_STOP_INDENT_PERCENTAGE)
+            initial_stop_price = round(initial_stop_price / min_price_increment) * min_price_increment
+            
+            # Рассчитываем начальную цену исполнения (немного выше стоп-цены)
+            initial_execution_price = executed_price * Decimal(1 + 0.001)  # 0.1% выше цены покупки
+            initial_execution_price = round(initial_execution_price / min_price_increment) * min_price_increment
+            
+            print(f"\nВыставляем трейлинг стоп...")
+            print(f"Начальная стоп-цена: {initial_stop_price}")
+            print(f"Отступ: {TRAILING_STOP_INDENT_PERCENTAGE * 100}% от максимальной цены")
+            print(f"Защитный спред: {TRAILING_STOP_SPREAD_PERCENTAGE}%")
+            print("Трейлинг стоп будет автоматически подтягиваться при росте цены")
+            
             try:
-                sell_response = client.orders.post_order(
-                    order_type=OrderType.ORDER_TYPE_MARKET,
-                    direction=OrderDirection.ORDER_DIRECTION_SELL,
+                # Выставляем трейлинг стоп ордер
+                trailing_stop_response = client.stop_orders.post_stop_order(
                     instrument_id=instrument_id,
                     quantity=1,
+                    price=decimal_to_quotation(initial_execution_price),
+                    stop_price=decimal_to_quotation(initial_stop_price),
+                    direction=StopOrderDirection.STOP_ORDER_DIRECTION_SELL,
                     account_id=account_id,
+                    stop_order_type=StopOrderType.STOP_ORDER_TYPE_TAKE_PROFIT,
+                    expiration_type=StopOrderExpirationType.STOP_ORDER_EXPIRATION_TYPE_GOOD_TILL_CANCEL,
+                    exchange_order_type=ExchangeOrderType.EXCHANGE_ORDER_TYPE_LIMIT,
+                    take_profit_type=TakeProfitType.TAKE_PROFIT_TYPE_TRAILING,
+                    trailing_data=PostStopOrderRequestTrailingData(
+                        indent=decimal_to_quotation(Decimal(TRAILING_STOP_INDENT_PERCENTAGE)),
+                        indent_type=TrailingValueType.TRAILING_VALUE_RELATIVE,
+                        spread=decimal_to_quotation(Decimal(TRAILING_STOP_SPREAD_PERCENTAGE / 100)),
+                        spread_type=TrailingValueType.TRAILING_VALUE_RELATIVE,
+                    ),
                     order_id=str(uuid4()),
                 )
                 
-                sell_status = sell_response.execution_report_status
-                print(f"Статус продажи: {sell_status} ({OrderExecutionReportStatus(sell_status).name})")
-                print(f"Сообщение: {sell_response.message}")
-                print(f"Исполнено лотов: {sell_response.lots_executed}")
+                trailing_stop_order_id = trailing_stop_response.stop_order_id
+                print(f"✅ Трейлинг стоп ордер успешно выставлен!")
+                print(f"ID трейлинг стоп ордера: {trailing_stop_order_id}")
+                print(f"Начальная стоп-цена: {initial_stop_price}")
                 
-                if sell_status in [
-                    OrderExecutionReportStatus.EXECUTION_REPORT_STATUS_NEW,
-                    OrderExecutionReportStatus.EXECUTION_REPORT_STATUS_FILL,
-                    OrderExecutionReportStatus.EXECUTION_REPORT_STATUS_PARTIALLYFILL,
-                ]:
-                    print("✅ Продажа успешно принята!")
-                    
-                    # После успешной продажи отменяем все заявки по инструменту
-                    cancel_all_orders_for_instrument(client, account_id, instrument_id, instrument_figi)
-                    
-                else:
-                    print(f"❌ Ошибка при продаже. Статус: {sell_status}")
             except Exception as e:
-                print(f"❌ Исключение при продаже: {e}")
+                print(f"❌ Ошибка при выставлении трейлинг стоп: {e}")
                 import traceback
                 traceback.print_exc()
-    else:
-        print(f"❌ Ошибка при покупке. Статус: {status} ({OrderExecutionReportStatus(status).name})")
-        if status == OrderExecutionReportStatus.EXECUTION_REPORT_STATUS_REJECTED:
-            print("Заявка отклонена брокером")
-        elif status == OrderExecutionReportStatus.EXECUTION_REPORT_STATUS_CANCELLED:
-            print("Заявка отменена")
+            
+            # Рассчитываем цену тейк-профит (1% выше цены покупки)
+            take_profit_price = executed_price * Decimal(1 + TAKE_PROFIT_PERCENTAGE)
+            
+            # Округляем цену до минимального шага цены
+            take_profit_price = round(take_profit_price / min_price_increment) * min_price_increment
+            
+            print(f"\nВыставляем тейк-профит на {TAKE_PROFIT_PERCENTAGE * 100}% выше цены покупки...")
+            print(f"Цена тейк-профит: {take_profit_price}")
+            
+            try:
+                # Выставляем тейк-профит ордер
+                take_profit_response = client.stop_orders.post_stop_order(
+                    instrument_id=instrument_id,
+                    quantity=1,
+                    price=decimal_to_quotation(take_profit_price),
+                    stop_price=decimal_to_quotation(take_profit_price),
+                    direction=StopOrderDirection.STOP_ORDER_DIRECTION_SELL,
+                    account_id=account_id,
+                    stop_order_type=StopOrderType.STOP_ORDER_TYPE_TAKE_PROFIT,
+                    expiration_type=StopOrderExpirationType.STOP_ORDER_EXPIRATION_TYPE_GOOD_TILL_CANCEL,
+                    order_id=str(uuid4()),
+                )
+                
+                take_profit_order_id = take_profit_response.stop_order_id
+                print(f"✅ Тейк-профит ордер успешно выставлен!")
+                print(f"ID тейк-профит ордера: {take_profit_order_id}")
+                print(f"Цена тейк-профит: {take_profit_price}")
+                
+            except Exception as e:
+                print(f"❌ Ошибка при выставлении тейк-профит: {e}")
+                import traceback
+                traceback.print_exc()
+            
+            print(f"\n✅ Все ордера выставлены успешно!")
+            print("Позиция будет автоматически закрыта при срабатывании:")
+            print("  - Тейк-профит: при достижении цены +1%")
+            print("  - Трейлинг стоп: при падении цены на 0.3% от максимума")
+            print("\nПрограмма завершена. Ордера работают автоматически.")
+            
+        else:
+            print(f"❌ Ошибка при покупке. Статус: {status} ({OrderExecutionReportStatus(status).name})")
+            if status == OrderExecutionReportStatus.EXECUTION_REPORT_STATUS_REJECTED:
+                print("Заявка отклонена брокером")
+            elif status == OrderExecutionReportStatus.EXECUTION_REPORT_STATUS_CANCELLED:
+                print("Заявка отменена")
