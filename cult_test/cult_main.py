@@ -9,6 +9,7 @@ from uuid import uuid4
 import pandas as pd
 from dotenv import load_dotenv
 
+# FIXED: Replaced tinkoff.invest with t_tech.invest
 from t_tech.invest import (
     Client,
     OrderDirection,
