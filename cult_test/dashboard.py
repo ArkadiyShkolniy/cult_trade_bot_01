@@ -8,9 +8,10 @@ from plotly.subplots import make_subplots
 # Импортируем вашего бота и конфиг
 try:
     from cult_test.cult_main import TradingBot, Config
-    from tinkoff.invest import Client
-except ImportError:
-    st.error("Не удалось найти файл cult_main.py. Запускайте streamlit из корня проекта.")
+    # FIXED: Use t_tech instead of tinkoff
+    from t_tech.invest import Client
+except ImportError as e:
+    st.error(f"Ошибка импорта: {e}. Убедитесь, что установлен пакет t-tech-investments и файлы бота корректны.")
     st.stop()
 
 # Настройка страницы
@@ -74,7 +75,7 @@ def load_market_data(ticker, short_period, long_period):
 st.subheader(f"График {ticker} (30 min)")
 
 # Кнопка обновления графика
-if st.button("🔄 Обновить данные рынка"):
+if st.button("🔄 Обновить данные рынка", help="Сбросить кеш и загрузить свежие данные"):
     load_market_data.clear()
 
 with st.spinner("Загрузка рыночных данных..."):

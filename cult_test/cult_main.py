@@ -9,7 +9,8 @@ from uuid import uuid4
 import pandas as pd
 from dotenv import load_dotenv
 
-from tinkoff.invest import (
+# FIXED: Replaced tinkoff.invest with t_tech.invest
+from t_tech.invest import (
     Client,
     OrderDirection,
     OrderType,
@@ -25,9 +26,9 @@ from tinkoff.invest import (
     CandleInterval,
     HistoricCandle,
 )
-from tinkoff.invest.services import Services
-from tinkoff.invest.schemas import TrailingValueType
-from tinkoff.invest.utils import (
+from t_tech.invest.services import Services
+from t_tech.invest.schemas import TrailingValueType
+from t_tech.invest.utils import (
     quotation_to_decimal,
     decimal_to_quotation,
     money_to_decimal,
