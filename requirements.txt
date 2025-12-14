@@ -1,0 +1,5 @@
+tinkoff-investments
+pandas
+plotly
+streamlit
+python-dotenv
