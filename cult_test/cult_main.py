@@ -9,7 +9,7 @@ from uuid import uuid4
 import pandas as pd
 from dotenv import load_dotenv
 
-from tinkoff.invest import (
+from t_tech.invest import (
     Client,
     OrderDirection,
     OrderType,
@@ -25,9 +25,9 @@ from tinkoff.invest import (
     CandleInterval,
     HistoricCandle,
 )
-from tinkoff.invest.services import Services
-from tinkoff.invest.schemas import TrailingValueType
-from tinkoff.invest.utils import (
+from t_tech.invest.services import Services
+from t_tech.invest.schemas import TrailingValueType
+from t_tech.invest.utils import (
     quotation_to_decimal,
     decimal_to_quotation,
     money_to_decimal,
@@ -230,7 +230,7 @@ class TradingBot:
                 stop_price=decimal_to_quotation(stop_price),
                 direction=StopOrderDirection.STOP_ORDER_DIRECTION_SELL,
                 account_id=self.account_id,
-                stop_order_type=StopOrderType.STOP_ORDER_TYPE_TAKE_PROFIT, # Trailing в API Tinkoff это тип TakeProfit
+                stop_order_type=StopOrderType.STOP_ORDER_TYPE_TAKE_PROFIT, # Trailing в API T-Invest это тип TakeProfit
                 expiration_type=StopOrderExpirationType.STOP_ORDER_EXPIRATION_TYPE_GOOD_TILL_CANCEL,
                 exchange_order_type=ExchangeOrderType.EXCHANGE_ORDER_TYPE_LIMIT,
                 take_profit_type=TakeProfitType.TAKE_PROFIT_TYPE_TRAILING,
