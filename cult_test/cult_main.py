@@ -51,8 +51,22 @@ class Config:
     CLASS_CODE = "TQBR"
     
     # Стратегия
+    STRATEGY_TYPE = "EMA"
     EMA_SHORT = 30
     EMA_LONG = 195
+    RSI_PERIOD = 14
+    RSI_OVERSOLD = 30
+    RSI_OVERBOUGHT = 70
+    MACD_FAST = 12
+    MACD_SLOW = 26
+    MACD_SIGNAL = 9
+    BB_PERIOD = 20
+    BB_STD = 2.0
+    STOCH_K = 14
+    STOCH_D = 3
+    PATTERN_TYPE = "candlestick"
+    PATTERN_NAMES = [] # Empty list means no patterns selected
+    
     TIMEFRAME = CandleInterval.CANDLE_INTERVAL_30_MIN
     
     # Риск-менеджмент
@@ -143,32 +157,67 @@ class TradingBot:
         return df
 
     def _analyze_market(self) -> str:
-        """Анализ EMA и генерация сигнала"""
-        df = self._get_candles_dataframe(days_back=60) # Достаточно для EMA 195 на 30мин
+        """Анализ рынка и генерация сигнала"""
+        # Определяем необходимый период истории в зависимости от стратегии
+        required_candles = 200 # Default
         
-        if len(df) < Config.EMA_LONG:
-            logger.warning(f"Недостаточно данных: {len(df)} < {Config.EMA_LONG}")
+        if Config.STRATEGY_TYPE == "EMA":
+            required_candles = Config.EMA_LONG + 10
+        elif Config.STRATEGY_TYPE == "RSI":
+            required_candles = Config.RSI_PERIOD * 2 + 10
+        elif Config.STRATEGY_TYPE == "MACD":
+            required_candles = Config.MACD_SLOW + 20
+        elif Config.STRATEGY_TYPE == "BB":
+            required_candles = Config.BB_PERIOD + 10
+        elif Config.STRATEGY_TYPE == "STOCH":
+            required_candles = Config.STOCH_K + 10
+        elif Config.STRATEGY_TYPE == "PATTERN":
+            required_candles = 50 # Паттерны обычно требуют немного свечей
+            
+        # Загружаем с запасом для расчета индикаторов
+        # Конвертируем в дни примерно (для _get_candles_dataframe)
+        # Упрощенно считаем 1 день = 24 часа. Для минутных свечей 200 свечей это всего 3 часа.
+        # Берем 60 дней для надежности как и раньше, но можно оптимизировать
+        df = self._get_candles_dataframe(days_back=60)
+        
+        if len(df) < required_candles:
+            logger.warning(f"Недостаточно данных: {len(df)} < {required_candles}")
             return 'HOLD'
 
-        # Расчет индикаторов через Pandas (векторизированно и быстро)
-        df['ema_short'] = df['close'].ewm(span=Config.EMA_SHORT, adjust=False).mean()
-        df['ema_long'] = df['close'].ewm(span=Config.EMA_LONG, adjust=False).mean()
+        # Инициализируем оптимизатор для использования его методов расчета
+        from cult_test.strategy_optimizer import StrategyOptimizer
+        optimizer = StrategyOptimizer(token=Config.TOKEN)
         
-        current = df.iloc[-1]
-        prev = df.iloc[-2]
-        
-        logger.info(f"EMA({Config.EMA_SHORT}): {current['ema_short']:.2f}")
-        logger.info(f"EMA({Config.EMA_LONG}): {current['ema_long']:.2f}")
-        
-        # Логика пересечения
-        # Золотой крест (BUY): Короткая пересекает длинную снизу вверх
-        if prev['ema_short'] <= prev['ema_long'] and current['ema_short'] > current['ema_long']:
-            logger.info("✅ СИГНАЛ: GOLDEN CROSS (BUY)")
-            return 'BUY'
+        # Расчет сигналов в зависимости от выбранной стратегии
+        if Config.STRATEGY_TYPE == "EMA":
+            df = optimizer.calculate_ema_signals(df, Config.EMA_SHORT, Config.EMA_LONG)
+        elif Config.STRATEGY_TYPE == "RSI":
+            df = optimizer.calculate_rsi_signals(df, Config.RSI_PERIOD, Config.RSI_OVERSOLD, Config.RSI_OVERBOUGHT)
+        elif Config.STRATEGY_TYPE == "MACD":
+            df = optimizer.calculate_macd_signals(df, Config.MACD_FAST, Config.MACD_SLOW, Config.MACD_SIGNAL)
+        elif Config.STRATEGY_TYPE == "BB":
+            df = optimizer.calculate_bb_signals(df, Config.BB_PERIOD, Config.BB_STD)
+        elif Config.STRATEGY_TYPE == "STOCH":
+            df = optimizer.calculate_stoch_signals(df, Config.STOCH_K, Config.STOCH_D)
+        elif Config.STRATEGY_TYPE == "PATTERN":
+            df = optimizer.calculate_pattern_signals(df, Config.PATTERN_TYPE, Config.PATTERN_NAMES)
+        else:
+            logger.warning(f"Неизвестный тип стратегии: {Config.STRATEGY_TYPE}, используется HOLD")
+            return 'HOLD'
             
-        # Мертвый крест (SELL): Короткая пересекает длинную сверху вниз
-        if prev['ema_short'] >= prev['ema_long'] and current['ema_short'] < current['ema_long']:
-            logger.info("✅ СИГНАЛ: DEATH CROSS (SELL)")
+        current = df.iloc[-1]
+        
+        # Логирование текущих значений
+        if Config.STRATEGY_TYPE == "EMA":
+            logger.info(f"EMA({Config.EMA_SHORT}): {current.get('ema_short', 0):.2f}, EMA({Config.EMA_LONG}): {current.get('ema_long', 0):.2f}")
+        elif Config.STRATEGY_TYPE == "RSI":
+            logger.info(f"RSI({Config.RSI_PERIOD}): {current.get('rsi', 0):.2f}")
+        
+        if current['signal'] == 1:
+            logger.info(f"✅ СИГНАЛ BUY по стратегии {Config.STRATEGY_TYPE}")
+            return 'BUY'
+        elif current['signal'] == -1:
+            logger.info(f"✅ СИГНАЛ SELL по стратегии {Config.STRATEGY_TYPE}")
             return 'SELL'
             
         return 'HOLD'

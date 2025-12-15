@@ -1,5 +1,7 @@
 t-tech-investments
-pandas>=2.0.0
-plotly>=5.0.0
-streamlit>=1.28.0
-python-dotenv>=1.0.0
+pandas
+numpy
+plotly
+streamlit
+python-dotenv
+
