@@ -33,4 +33,4 @@ ENV RUN_MODE=dashboard
 # - Для dashboard: RUN_MODE=dashboard (по умолчанию)
 # - Для бота: RUN_MODE=bot
 # Запускаем streamlit из корня проекта для корректных импортов
-CMD sh -c "if [ \"$RUN_MODE\" = \"bot\" ]; then python cult_test/cult_main.py; else cd /app && streamlit run cult_test/dashboard.py --server.port=8501 --server.address=0.0.0.0; fi"
+CMD ["sh", "-c", "if [ \"$RUN_MODE\" = \"bot\" ]; then python cult_test/cult_main.py; else cd /app && streamlit run cult_test/dashboard.py --server.port=8501 --server.address=0.0.0.0; fi"]
