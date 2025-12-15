@@ -1,5 +1,6 @@
-tinkoff-investments
+t-tech-investments
 pandas
+numpy
 plotly
 streamlit
 python-dotenv

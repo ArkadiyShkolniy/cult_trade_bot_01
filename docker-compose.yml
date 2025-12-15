@@ -1,0 +1,36 @@
+version: '3.8'
+
+services:
+  # Dashboard сервис (веб-интерфейс)
+  dashboard:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: cult_trade_dashboard
+    ports:
+      - "8501:8501"
+    env_file:
+      - .env
+    restart: unless-stopped
+    environment:
+      - PYTHONUNBUFFERED=1
+      - RUN_MODE=dashboard
+    volumes:
+      # Монтируем код для разработки (опционально, можно убрать для production)
+      - ./cult_test:/app/cult_test
+
+  # Бот сервис (торговый бот)
+  bot:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: cult_trade_bot
+    env_file:
+      - .env
+    restart: unless-stopped
+    environment:
+      - PYTHONUNBUFFERED=1
+      - RUN_MODE=bot
+    volumes:
+      # Монтируем код для разработки (опционально, можно убрать для production)
+      - ./cult_test:/app/cult_test
