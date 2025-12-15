@@ -280,7 +280,7 @@ class TradingBot:
                 stop_price=decimal_to_quotation(stop_price),
                 direction=StopOrderDirection.STOP_ORDER_DIRECTION_SELL,
                 account_id=self.account_id,
-                stop_order_type=StopOrderType.STOP_ORDER_TYPE_TAKE_PROFIT, # Trailing в API Tinkoff это тип TakeProfit
+                stop_order_type=StopOrderType.STOP_ORDER_TYPE_TAKE_PROFIT, # Trailing в API T-Invest это тип TakeProfit
                 expiration_type=StopOrderExpirationType.STOP_ORDER_EXPIRATION_TYPE_GOOD_TILL_CANCEL,
                 exchange_order_type=ExchangeOrderType.EXCHANGE_ORDER_TYPE_LIMIT,
                 take_profit_type=TakeProfitType.TAKE_PROFIT_TYPE_TRAILING,
