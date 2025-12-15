@@ -2,16 +2,26 @@ import streamlit as st
 import pandas as pd
 import time
 import logging
+import sys
+import os
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
+
+# Добавляем корень проекта в путь для импортов
+project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if project_root not in sys.path:
+    sys.path.insert(0, project_root)
 
 # Импортируем вашего бота и конфиг
 try:
     from cult_test.cult_main import TradingBot, Config
-    # FIXED: Use t_tech instead of tinkoff
     from t_tech.invest import Client
 except ImportError as e:
-    st.error(f"Ошибка импорта: {e}. Убедитесь, что установлен пакет t-tech-investments и файлы бота корректны.")
+    st.error(f"Ошибка импорта: {e}")
+    st.error(f"PYTHONPATH: {sys.path}")
+    st.error(f"Текущая директория: {os.getcwd()}")
+    st.error(f"Файл dashboard.py: {__file__}")
+    st.error("Убедитесь, что запускаете streamlit из корня проекта.")
     st.stop()
 
 # Настройка страницы
