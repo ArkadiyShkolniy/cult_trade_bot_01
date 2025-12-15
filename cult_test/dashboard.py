@@ -1,7 +1,6 @@
 import streamlit as st
 import pandas as pd
 import time
-import logging
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
@@ -9,136 +8,129 @@ from plotly.subplots import make_subplots
 try:
     from cult_test.cult_main import TradingBot, Config
     from t_tech.invest import Client
-    from t_tech.invest.utils import quotation_to_decimal
 except ImportError as e:
-    st.error(f"Ошибка импорта: {e}. Убедитесь, что запускаете из корня проекта.")
+    st.error(f"Ошибка импорта: {e}")
     st.stop()
 
-# Настройка страницы
-st.set_page_config(
-    page_title="Trading Bot Dashboard",
-    page_icon="📈",
-    layout="wide",
-)
+st.set_page_config(page_title="Trading Bot Dashboard", layout="wide")
+st.title(f"🤖 Trading Bot: {Config.TICKER}")
 
-st.title(f"🤖 Trading Bot Dashboard: {Config.TICKER}")
-
-# --- Боковая панель: Управление ---
+# --- Боковая панель ---
 st.sidebar.header("⚙️ Управление")
 
-# Статус бота (эмуляция)
 if 'bot_running' not in st.session_state:
     st.session_state.bot_running = False
 
 def toggle_bot():
     st.session_state.bot_running = not st.session_state.bot_running
 
-btn_label = "⛔ Остановить бота" if st.session_state.bot_running else "▶️ Запустить бота"
+btn_label = "⛔ Остановить" if st.session_state.bot_running else "▶️ Запустить"
 st.sidebar.button(btn_label, on_click=toggle_bot)
 
+# Кнопка сброса кэша и обновления
+if st.sidebar.button("🔄 Обновить данные"):
+    st.cache_data.clear()
+    st.rerun()
+
 if st.session_state.bot_running:
-    st.sidebar.success("Статус: РАБОТАЕТ")
+    st.sidebar.success("РАБОТАЕТ")
 else:
-    st.sidebar.warning("Статус: ОСТАНОВЛЕН")
+    st.sidebar.warning("ОСТАНОВЛЕН")
 
+# Параметры
 st.sidebar.markdown("---")
-st.sidebar.header("🛠 Параметры стратегии")
+Config.EMA_SHORT = st.sidebar.number_input("EMA Short", min_value=5, value=Config.EMA_SHORT)
+Config.EMA_LONG = st.sidebar.number_input("EMA Long", min_value=20, value=Config.EMA_LONG)
 
-# Чтение и изменение параметров Config (влияет на текущую сессию)
-ema_short = st.sidebar.number_input("EMA Short", min_value=5, value=Config.EMA_SHORT)
-ema_long = st.sidebar.number_input("EMA Long", min_value=20, value=Config.EMA_LONG)
+# --- График ---
+st.subheader("График (M15)")
 
-# Обновляем конфиг при изменении
-if ema_short != Config.EMA_SHORT:
-    Config.EMA_SHORT = ema_short
-if ema_long != Config.EMA_LONG:
-    Config.EMA_LONG = ema_long
-
-# --- Основная часть: График ---
-st.subheader("График и Индикаторы")
-
-@st.cache_data(ttl=60)  # Кэшируем данные на 60 секунд
-def load_market_data():
-    """Загрузка данных через методы бота"""
+@st.cache_data(ttl=60)
+def load_data():
     try:
         bot = TradingBot()
-        # Инициализируем клиента для загрузки данных (без полной настройки аккаунта)
         with Client(Config.TOKEN) as client:
             bot.client = client
             bot._setup_instrument()
-            df = bot._get_candles_dataframe(days_back=10) # 10 дней для графика
-            return df, None
+            # ВАЖНО: Загружаем данные за 40 дней для корректного расчета EMA 260
+            return bot._get_candles_dataframe(days_back=40), None
     except Exception as e:
         return None, str(e)
 
-with st.spinner('Загрузка данных рынка...'):
-    df, error = load_market_data()
+with st.spinner('Загрузка...'):
+    df_full, error = load_data()
 
-if error:
-    st.error(f"Ошибка загрузки данных: {error}")
-elif df is not None and not df.empty:
-    # Расчет индикаторов для отображения
-    df['ema_short'] = df['close'].ewm(span=Config.EMA_SHORT, adjust=False).mean()
-    df['ema_long'] = df['close'].ewm(span=Config.EMA_LONG, adjust=False).mean()
+if df_full is not None and not df_full.empty:
+    # 1. Сначала считаем индикаторы на ПОЛНОЙ истории
+    df_full['ema_short'] = df_full['close'].ewm(span=Config.EMA_SHORT, adjust=False).mean()
+    df_full['ema_long'] = df_full['close'].ewm(span=Config.EMA_LONG, adjust=False).mean()
 
-    # Последняя свеча
-    last_close = df.iloc[-1]['close']
-    last_ema_s = df.iloc[-1]['ema_short']
-    last_ema_l = df.iloc[-1]['ema_long']
+    # 2. Обрезаем для отображения (последние ~500 свечей)
+    df = df_full.tail(500).copy()
+
+    # Форматируем дату
+    df['date_str'] = df.index.strftime('%d.%m %H:%M')
 
     # Метрики
-    col1, col2, col3 = st.columns(3)
-    col1.metric("Цена Close", f"{last_close:.2f}")
-    col2.metric(f"EMA {Config.EMA_SHORT}", f"{last_ema_s:.2f}", delta=f"{last_ema_s - last_ema_l:.2f}")
-    col3.metric(f"EMA {Config.EMA_LONG}", f"{last_ema_l:.2f}")
+    last = df.iloc[-1]
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Цена", f"{last['close']:.2f}")
+    c2.metric(f"EMA {Config.EMA_SHORT}", f"{last['ema_short']:.2f}")
+    c3.metric(f"EMA {Config.EMA_LONG}", f"{last['ema_long']:.2f}")
 
-    # График Plotly
-    fig = make_subplots(rows=1, cols=1, shared_xaxes=True, vertical_spacing=0.05)
+    # График
+    fig = make_subplots(rows=1, cols=1, shared_xaxes=True)
 
     # Свечи
     fig.add_trace(go.Candlestick(
-        x=df.index,
-        open=df['open'] if 'open' in df.columns else df['close'], # Fallback если только close
-        high=df['high'] if 'high' in df.columns else df['close'],
-        low=df['low'] if 'low' in df.columns else df['close'],
-        close=df['close'],
-        name='Цена'
+        x=df['date_str'],
+        open=df['open'], high=df['high'], low=df['low'], close=df['close'],
+        name='Цена',
+        increasing_line_color='#26A69A', decreasing_line_color='#EF5350'
     ))
 
-    # EMA Линии
-    fig.add_trace(go.Scatter(x=df.index, y=df['ema_short'], line=dict(color='orange', width=1), name=f'EMA {Config.EMA_SHORT}'))
-    fig.add_trace(go.Scatter(x=df.index, y=df['ema_long'], line=dict(color='blue', width=1), name=f'EMA {Config.EMA_LONG}'))
+    # EMA
+    fig.add_trace(go.Scatter(x=df['date_str'], y=df['ema_short'], line=dict(color='#FFA726', width=1.5), name=f'EMA {Config.EMA_SHORT}'))
+    fig.add_trace(go.Scatter(x=df['date_str'], y=df['ema_long'], line=dict(color='#42A5F5', width=1.5), name=f'EMA {Config.EMA_LONG}'))
 
-    # Сигналы (точки пересечения)
-    # Находим точки пересечения
+    # Сигналы
     cross_buy = df[(df['ema_short'] > df['ema_long']) & (df['ema_short'].shift(1) <= df['ema_long'].shift(1))]
     cross_sell = df[(df['ema_short'] < df['ema_long']) & (df['ema_short'].shift(1) >= df['ema_long'].shift(1))]
 
-    fig.add_trace(go.Scatter(
-        x=cross_buy.index, y=cross_buy['ema_short'],
-        mode='markers', marker=dict(color='green', size=10, symbol='triangle-up'),
-        name='Signal BUY'
-    ))
-    
-    fig.add_trace(go.Scatter(
-        x=cross_sell.index, y=cross_sell['ema_short'],
-        mode='markers', marker=dict(color='red', size=10, symbol='triangle-down'),
-        name='Signal SELL'
-    ))
+    if not cross_buy.empty:
+        fig.add_trace(go.Scatter(
+            x=cross_buy['date_str'], y=cross_buy['ema_short'],
+            mode='markers', marker=dict(color='#00E676', size=12, symbol='triangle-up'),
+            name='BUY'
+        ))
+    if not cross_sell.empty:
+        fig.add_trace(go.Scatter(
+            x=cross_sell['date_str'], y=cross_sell['ema_short'],
+            mode='markers', marker=dict(color='#FF1744', size=12, symbol='triangle-down'),
+            name='SELL'
+        ))
 
+    # Настройки
     fig.update_layout(
         xaxis_rangeslider_visible=False,
-        height=500,
-        margin=dict(l=10, r=10, t=30, b=10),
-        template="plotly_dark"
+        height=600,
+        margin=dict(l=10, r=10, t=10, b=10),
+        template="plotly_dark",
+        xaxis=dict(
+            type='category', 
+            nticks=10, 
+            tickangle=-45
+        ),
+        legend=dict(orientation="h", y=1, x=0)
     )
-    
+
     st.plotly_chart(fig, use_container_width=True)
 
+elif error:
+    st.error(f"Ошибка: {error}")
 else:
-    st.warning("Нет данных для отображения.")
+    st.info("Нет данных")
 
-# Автообновление
 if st.session_state.bot_running:
     time.sleep(60)
     st.rerun()

@@ -39,15 +39,16 @@ class Config:
     TOKEN = os.environ.get("TINKOFF_INVEST_TOKEN")
     
     # --- НАСТРОЙКИ ИНСТРУМЕНТА (RTS Mini) ---
-    # RMH6 - Март 2026 (RTS Mini)
-    # Проверьте актуальный контракт!
-    TICKER = "RMH6"  
+    TICKER = "RMZ5"
     CLASS_CODE = "SPBFUT" 
     
     # --- СТРАТЕГИЯ ---
     EMA_SHORT = 30
     EMA_LONG = 260
-    TIMEFRAME = CandleInterval.CANDLE_INTERVAL_15_MIN
+    
+    # Скачиваем 1 минуту, торгуем на 15 минутах
+    DOWNLOAD_TIMEFRAME = CandleInterval.CANDLE_INTERVAL_1_MIN  # Изменено на 1 минуту
+    TRADE_TIMEFRAME_MINUTES = 15
     
     @classmethod
     def validate(cls):
@@ -63,7 +64,7 @@ class TradingBot:
         
     def run(self):
         """Основной цикл запуска в реальном времени"""
-        logger.info(f"Запуск робота по {Config.TICKER} (TF: 15min, EMA: {Config.EMA_SHORT}/{Config.EMA_LONG})")
+        logger.info(f"Запуск робота по {Config.TICKER} (Data: 5min -> Trade: 15min, EMA: {Config.EMA_SHORT}/{Config.EMA_LONG})")
         
         while True:
             try:
@@ -119,12 +120,9 @@ class TradingBot:
         """Проверка наличия позиций"""
         positions = self.client.operations.get_positions(account_id=self.account_id)
         
-        # Проверяем securities
         for p in positions.securities:
             if p.figi == self.instrument.figi and p.balance != 0:
                 return True
-                    
-        # Проверяем futures
         if hasattr(positions, 'futures'):
              for f in positions.futures:
                 if f.figi == self.instrument.figi and f.balance != 0:
@@ -132,18 +130,23 @@ class TradingBot:
         return False
 
     def _get_candles_dataframe(self, days_back: int = 50) -> pd.DataFrame:
+        """Загрузка 5-минутных свечей и ресемплинг в 15-минутные"""
         candles = self.client.get_all_candles(
             instrument_id=self.instrument.uid,
             from_=now() - timedelta(days=days_back),
             to=now(),
-            interval=Config.TIMEFRAME,
+            interval=Config.DOWNLOAD_TIMEFRAME, # Скачиваем 5 мин
         )
         
         data = []
         for c in candles:
             data.append({
                 'time': c.time,
+                'open': float(quotation_to_decimal(c.open)),
+                'high': float(quotation_to_decimal(c.high)),
+                'low': float(quotation_to_decimal(c.low)),
                 'close': float(quotation_to_decimal(c.close)),
+                'volume': c.volume
             })
             
         if not data:
@@ -151,10 +154,29 @@ class TradingBot:
             
         df = pd.DataFrame(data)
         df['time'] = pd.to_datetime(df['time'])
+        df['time'] = df['time'].dt.tz_convert('Europe/Moscow').dt.tz_localize(None)
         df.set_index('time', inplace=True)
-        return df
+
+        # РЕСЕМПЛИНГ: Превращаем 5-минутки в 15-минутки
+        # Правила агрегации: Open - первый, High - макс, Low - мин, Close - последний, Volume - сумма
+        logic = {
+            'open': 'first',
+            'high': 'max',
+            'low': 'min',
+            'close': 'last',
+            'volume': 'sum'
+        }
+        
+        # '15T' означает 15 минут. label='left' означает, что свеча 10:00-10:15 будет называться 10:00
+        df_resampled = df.resample(f'{Config.TRADE_TIMEFRAME_MINUTES}min', label='left', closed='left').agg(logic)
+        
+        # Удаляем пустые интервалы (если были пропуски торгов)
+        df_resampled.dropna(inplace=True)
+        
+        return df_resampled
 
     def _analyze_market(self) -> str:
+        # Загружаем данные (они уже будут 15-минутными после ресемплинга)
         df = self._get_candles_dataframe(days_back=30)
         
         if len(df) < Config.EMA_LONG:
@@ -178,10 +200,8 @@ class TradingBot:
         return 'HOLD'
 
     def _execute_order(self, direction):
-        """Универсальная функция для отправки рыночного ордера"""
         action = "Покупка" if direction == OrderDirection.ORDER_DIRECTION_BUY else "Продажа"
         logger.info(f"{action} 1 контракта {Config.TICKER}...")
-        
         try:
             response = self.client.orders.post_order(
                 instrument_id=self.instrument.uid,
@@ -191,15 +211,10 @@ class TradingBot:
                 direction=direction,
                 order_id=str(uuid4())
             )
-            
-            status = response.execution_report_status
-            logger.info(f"Статус ордера: {OrderExecutionReportStatus(status).name}")
-            
             price = money_to_decimal(response.executed_order_price)
             if price == 0:
                 price = money_to_decimal(response.initial_security_price)
             logger.info(f"Цена исполнения (примерно): {price}")
-            
         except Exception as e:
             logger.error(f"Ошибка при исполнении ордера: {e}")
 
