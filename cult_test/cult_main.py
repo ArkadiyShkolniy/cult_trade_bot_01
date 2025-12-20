@@ -39,16 +39,15 @@ class Config:
     TOKEN = os.environ.get("TINKOFF_INVEST_TOKEN")
     
     # --- НАСТРОЙКИ ИНСТРУМЕНТА (RTS Mini) ---
-    TICKER = "RMZ5"
+    TICKER = "RMH6"
     CLASS_CODE = "SPBFUT" 
     
     # --- СТРАТЕГИЯ ---
     EMA_SHORT = 30
     EMA_LONG = 260
     
-    # Скачиваем 1 минуту, торгуем на 15 минутах
-    DOWNLOAD_TIMEFRAME = CandleInterval.CANDLE_INTERVAL_1_MIN  # Изменено на 1 минуту
-    TRADE_TIMEFRAME_MINUTES = 15
+    # Скачиваем сразу 15 минут
+    DOWNLOAD_TIMEFRAME = CandleInterval.CANDLE_INTERVAL_15_MIN
     
     @classmethod
     def validate(cls):
@@ -64,7 +63,7 @@ class TradingBot:
         
     def run(self):
         """Основной цикл запуска в реальном времени"""
-        logger.info(f"Запуск робота по {Config.TICKER} (Data: 5min -> Trade: 15min, EMA: {Config.EMA_SHORT}/{Config.EMA_LONG})")
+        logger.info(f"Запуск робота по {Config.TICKER} (Data: 15min, EMA: {Config.EMA_SHORT}/{Config.EMA_LONG})")
         
         while True:
             try:
@@ -130,12 +129,12 @@ class TradingBot:
         return False
 
     def _get_candles_dataframe(self, days_back: int = 50) -> pd.DataFrame:
-        """Загрузка 5-минутных свечей и ресемплинг в 15-минутные"""
+        """Загрузка 15-минутных свечей"""
         candles = self.client.get_all_candles(
             instrument_id=self.instrument.uid,
             from_=now() - timedelta(days=days_back),
             to=now(),
-            interval=Config.DOWNLOAD_TIMEFRAME, # Скачиваем 5 мин
+            interval=Config.DOWNLOAD_TIMEFRAME, 
         )
         
         data = []
@@ -157,26 +156,10 @@ class TradingBot:
         df['time'] = df['time'].dt.tz_convert('Europe/Moscow').dt.tz_localize(None)
         df.set_index('time', inplace=True)
 
-        # РЕСЕМПЛИНГ: Превращаем 5-минутки в 15-минутки
-        # Правила агрегации: Open - первый, High - макс, Low - мин, Close - последний, Volume - сумма
-        logic = {
-            'open': 'first',
-            'high': 'max',
-            'low': 'min',
-            'close': 'last',
-            'volume': 'sum'
-        }
-        
-        # '15T' означает 15 минут. label='left' означает, что свеча 10:00-10:15 будет называться 10:00
-        df_resampled = df.resample(f'{Config.TRADE_TIMEFRAME_MINUTES}min', label='left', closed='left').agg(logic)
-        
-        # Удаляем пустые интервалы (если были пропуски торгов)
-        df_resampled.dropna(inplace=True)
-        
-        return df_resampled
+        return df
 
     def _analyze_market(self) -> str:
-        # Загружаем данные (они уже будут 15-минутными после ресемплинга)
+        # Загружаем данные
         df = self._get_candles_dataframe(days_back=30)
         
         if len(df) < Config.EMA_LONG:
